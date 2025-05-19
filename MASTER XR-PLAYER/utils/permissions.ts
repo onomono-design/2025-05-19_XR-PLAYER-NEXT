@@ -36,7 +36,10 @@ export function supportsDeviceOrientation(): boolean {
  * @returns true if permission is required, false otherwise
  */
 export function requiresOrientationPermission(): boolean {
+  // Specifically check for iOS devices which require permission
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream
   return (
+    isIOS &&
     typeof DeviceOrientationEvent !== "undefined" &&
     typeof (DeviceOrientationEvent as any).requestPermission === "function"
   )
@@ -48,13 +51,19 @@ export function requiresOrientationPermission(): boolean {
  */
 export async function requestOrientationPermission(): Promise<"granted" | "denied" | "not_required"> {
   if (!supportsDeviceOrientation()) {
+    console.log("Device orientation not supported")
+    storeOrientationPermission(false)
     return "not_required"
   }
 
   if (requiresOrientationPermission()) {
+    console.log("Device requires orientation permission, requesting...")
+    
     try {
+      // This must be called from a user gesture handler on iOS
       const permissionState = await (DeviceOrientationEvent as any).requestPermission()
       const granted = permissionState === "granted"
+      console.log("Permission request result:", permissionState)
       storeOrientationPermission(granted)
       return granted ? "granted" : "denied"
     } catch (error) {
@@ -64,7 +73,22 @@ export async function requestOrientationPermission(): Promise<"granted" | "denie
     }
   } else {
     // Permission is implicitly granted on devices that don't require explicit permission
+    console.log("Device orientation permission not required, marking as granted")
     storeOrientationPermission(true)
     return "not_required"
+  }
+}
+
+/**
+ * Force clear any stored orientation permission
+ * Useful for testing or when permissions need to be re-requested
+ */
+export function clearOrientationPermission(): void {
+  try {
+    localStorage.removeItem("deviceOrientationPermission")
+    sessionStorage.removeItem("ios_orientation_permission")
+    console.log("Cleared orientation permission from storage")
+  } catch (e) {
+    console.error("Could not clear permission status:", e)
   }
 }

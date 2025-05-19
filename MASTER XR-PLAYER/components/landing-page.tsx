@@ -8,7 +8,11 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useDeviceType } from "@/hooks/use-device-type"
 import Image from "next/image"
-import { requestOrientationPermission } from "@/utils/permissions"
+import {
+  requestOrientationPermission as requestOrientationPermissionUtil,
+  getOrientationPermission as getOrientationPermissionUtil,
+  requiresOrientationPermission as requiresOrientationPermissionUtil
+} from "@/utils/permissions";
 import { usePermission } from "@/contexts/permission-context"
 
 export type LandingPageEvent =
@@ -106,7 +110,6 @@ export function LandingPage({
 }: LandingPageProps) {
   const detectedDeviceType = useDeviceType()
   const deviceType = forceMobile ? "mobile" : detectedDeviceType
-  const [showPermissionModal, setShowPermissionModal] = useState(false)
   const { orientationPermission, setOrientationPermission, permissionChecked } = usePermission()
   const [isMounted, setIsMounted] = useState(false)
   const [dynamicLogoWidth, setDynamicLogoWidth] = useState(logoWidth)
@@ -115,6 +118,9 @@ export function LandingPage({
     description: "text-lg md:text-xl",
     button: "text-lg px-8 py-6",
   })
+  
+  // Explicitly detect iOS to ensure correct behavior
+  const isIOS = typeof navigator !== "undefined" ? /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream : false
 
   // Set isMounted to true when component mounts (client-side only)
   useEffect(() => {
@@ -142,56 +148,102 @@ export function LandingPage({
 
   const buttonText = isTeaser ? teaserButtonText : tourButtonText
 
+  const requestPermissionAndProceed = async () => {
+    console.log("Requesting permission and proceeding...");
+    console.log("iOS device detected:", isIOS);
+    console.log("Requires permission:", requiresOrientationPermissionUtil());
+    
+    let granted = false;
+    
+    // For iOS devices that require permission
+    if (isIOS && requiresOrientationPermissionUtil()) {
+      console.log("iOS device requires explicit permission, requesting now...");
+      try {
+        // Must be called directly from a user gesture handler
+        const permissionState = await (DeviceOrientationEvent as any).requestPermission();
+        console.log("iOS permission result:", permissionState);
+        
+        granted = permissionState === "granted";
+        
+        // Store the result
+        setOrientationPermission(granted ? "granted" : "denied");
+        
+        if (onEvent) {
+          onEvent({ type: "PERMISSION_RESULT", granted });
+        }
+      } catch (error) {
+        console.error("Error requesting iOS orientation permission:", error);
+        setOrientationPermission("denied");
+        granted = false;
+        
+        if (onEvent) {
+          onEvent({ type: "PERMISSION_RESULT", granted: false });
+        }
+      }
+    } else {
+      // Android or other devices that don't require explicit permission
+      console.log("Device doesn't require explicit permission or is not iOS");
+      const permissionResult = await requestOrientationPermissionUtil();
+      granted = permissionResult === "granted" || permissionResult === "not_required";
+      setOrientationPermission(granted ? "granted" : "denied");
+      
+      if (onEvent) {
+        onEvent({ type: "PERMISSION_RESULT", granted });
+      }
+    }
+
+    // Proceed with the tour regardless of permission result
+    // The XR component will handle limitations if permission was denied
+    if (onEvent) {
+      onEvent({
+        type: "MOBILE_BEGIN_TOUR",
+        isTeaser,
+        permissionGranted: granted,
+      });
+    }
+  };
+
   const handleButtonClick = () => {
     if (deviceType === "mobile") {
-      // Check if permission is already granted
-      if (orientationPermission === "granted" || orientationPermission === "not_required") {
-        if (onEvent) {
-          onEvent({
-            type: "MOBILE_BEGIN_TOUR",
-            isTeaser,
-            permissionGranted: true,
-          })
-        }
+      // For iOS devices, we always need to request permission on button click
+      // as it must be triggered by a user interaction
+      if (isIOS && requiresOrientationPermissionUtil()) {
+        console.log("iOS device detected, requesting permission directly from click handler");
+        requestPermissionAndProceed();
       } else {
-        setShowPermissionModal(true)
-      }
-    } else if (onEvent) {
-      onEvent({ type: "DESKTOP_BEGIN_TOUR", isTeaser })
-    }
-  }
-
-  const handleContinue = async () => {
-    try {
-      const permissionResult = await requestOrientationPermission()
-      const granted = permissionResult === "granted" || permissionResult === "not_required"
-
-      // Update context
-      setOrientationPermission(granted ? "granted" : "denied")
-
-      // Notify parent component
-      if (onEvent) {
-        onEvent({ type: "PERMISSION_RESULT", granted })
-
-        if (granted) {
-          onEvent({
-            type: "MOBILE_BEGIN_TOUR",
-            isTeaser,
-            permissionGranted: true,
-          })
+        // For non-iOS devices, check if we already have permission
+        const currentPermission = getOrientationPermissionUtil();
+        
+        if (currentPermission === "granted" || (!requiresOrientationPermissionUtil() && currentPermission !== "denied")) {
+          // Already granted or not required and not explicitly denied
+          console.log("Permission already granted or not required");
+          if (onEvent) {
+            onEvent({
+              type: "MOBILE_BEGIN_TOUR",
+              isTeaser,
+              permissionGranted: true,
+            });
+          }
+        } else if (currentPermission === "denied") {
+          // Permission was explicitly denied before
+          console.log("Permission was previously denied");
+          if (onEvent) {
+            onEvent({
+              type: "MOBILE_BEGIN_TOUR",
+              isTeaser,
+              permissionGranted: false,
+            });
+          }
+        } else {
+          // Permission not yet asked, request it
+          console.log("Permission not yet determined, requesting");
+          requestPermissionAndProceed();
         }
       }
-    } catch (error) {
-      console.error("Error requesting permission:", error)
-      setOrientationPermission("denied")
-
-      if (onEvent) {
-        onEvent({ type: "PERMISSION_RESULT", granted: false })
-      }
-    } finally {
-      setShowPermissionModal(false)
+    } else if (onEvent) { // Desktop
+      onEvent({ type: "DESKTOP_BEGIN_TOUR", isTeaser });
     }
-  }
+  };
 
   const renderDeviceIcon = () => {
     if (!showDeviceIcon) return null
@@ -256,30 +308,6 @@ export function LandingPage({
           {buttonText} <ArrowRight className="ml-2 h-5 w-5" />
         </Button>
       </div>
-
-      {/* Permission Modal */}
-      {showPermissionModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-            onClick={() => setShowPermissionModal(false)}
-          />
-          <div className="relative bg-black/80 rounded-xl p-6 max-w-md w-full text-center">
-            <h2 className="text-2xl font-bold mb-4">Device Permissions Required</h2>
-            <p className="mb-6">
-              To provide the best experience, we need permission to access your device's orientation sensors. This helps
-              us create an immersive experience tailored to your device.
-            </p>
-            <Button
-              size="lg"
-              className="rounded-full bg-white text-black hover:bg-white/90 px-8 py-4"
-              onClick={handleContinue}
-            >
-              Continue
-            </Button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

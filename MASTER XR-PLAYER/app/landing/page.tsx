@@ -3,6 +3,8 @@
 import { useState, useEffect } from "react"
 import { LandingPage, type LandingPageEvent } from "@/components/landing-page"
 import { PermissionProvider, usePermission } from "@/contexts/permission-context"
+import { requestOrientationPermission } from "@/utils/permissions"
+import { useDeviceType } from "@/hooks/use-device-type"
 
 // Update the LandingContent function to include devMode state and pass it to LandingPage
 function LandingContent() {
@@ -10,9 +12,12 @@ function LandingContent() {
   const [isTeaser, setIsTeaser] = useState(false)
   const [forceMobile, setForceMobile] = useState(false)
   const [eventLog, setEventLog] = useState<Array<{ type: string; data: any; time: string }>>([])
-  const { orientationPermission, permissionChecked } = usePermission()
+  const { orientationPermission, permissionChecked, setOrientationPermission } = usePermission()
   const [devMode, setDevMode] = useState(true)
   const [isMounted, setIsMounted] = useState(false)
+  const deviceType = useDeviceType()
+  const isMobile = forceMobile || deviceType === "mobile"
+  const isIOS = typeof navigator !== "undefined" ? /iPad|iPhone|iPod/.test(navigator.userAgent) : false
 
   const handleEvent = (event: LandingPageEvent) => {
     console.log("Event received:", event)
@@ -31,6 +36,20 @@ function LandingContent() {
         ...prev,
       ].slice(0, 10),
     ) // Keep only the last 10 events
+
+    // If this is a permission result, we can log additional details
+    if (event.type === "PERMISSION_RESULT") {
+      console.log("Permission result detected:", event);
+      
+      // For iOS, we should track this in session storage to avoid re-asking
+      if (isIOS) {
+        try {
+          sessionStorage.setItem("ios_orientation_permission", event.granted ? "granted" : "denied");
+        } catch (e) {
+          console.error("Could not store iOS permission in session storage:", e);
+        }
+      }
+    }
   }
 
   // Set isMounted to true when component mounts (client-side only)
@@ -47,12 +66,67 @@ function LandingContent() {
       if (devParam === "false") {
         setDevMode(false)
       }
+      
+      // Force a clear session storage on fresh visits to landing page
+      // This helps with debugging and ensures permission is requested
+      if (!sessionStorage.getItem("landing_page_visited")) {
+        console.log("First visit to landing page in this session, clearing previous permission state");
+        try {
+          sessionStorage.removeItem("ios_orientation_permission");
+          sessionStorage.removeItem("xr_mobile_camera_connecting");
+          sessionStorage.setItem("landing_page_visited", "true");
+        } catch (e) {
+          console.error("Error manipulating session storage:", e);
+        }
+      }
     }
 
     return () => {
       document.body.style.overflow = ""
     }
   }, [])
+
+  // Check for device orientation permission on mobile devices when component mounts
+  useEffect(() => {
+    if (!isMounted) return;
+    
+    const checkMobilePermissions = async () => {
+      if (isMobile && orientationPermission === "unknown") {
+        console.log("Mobile device detected, checking orientation permissions");
+        
+        // For iOS, we want to defer permission requests until user interaction
+        if (isIOS) {
+          console.log("iOS detected, waiting for user interaction before requesting permission");
+          return;
+        }
+        
+        try {
+          // Automatically request permission on Android (non-iOS mobile)
+          const permissionResult = await requestOrientationPermission();
+          const granted = permissionResult === "granted" || permissionResult === "not_required";
+          
+          setOrientationPermission(granted ? "granted" : "denied");
+          console.log(`Device orientation permission ${granted ? 'granted' : 'denied'}`);
+          
+          // Add to event log
+          const now = new Date();
+          const timeString = now.toLocaleTimeString();
+          setEventLog((prev) => [
+            {
+              type: "PERMISSION_AUTO_CHECK",
+              data: { granted },
+              time: timeString,
+            },
+            ...prev,
+          ].slice(0, 10));
+        } catch (error) {
+          console.error("Error checking device orientation permission:", error);
+        }
+      }
+    };
+    
+    checkMobilePermissions();
+  }, [isMounted, isMobile, orientationPermission, setOrientationPermission, isIOS]);
 
   // Toggle dev mode and update URL
   const toggleDevMode = () => {
